@@ -1,6 +1,6 @@
 {
-  "name": "Net Control Log",
-  "short_name": "Net Control",
+  "name": "NetLog",
+  "short_name": "NetLog",
   "start_url": ".",
   "display": "standalone",
   "background_color": "#15233F",

@@ -1,4 +1,4 @@
-# Net Control Log
+# NetLog
 
 A phone-friendly logger for running directed amateur radio nets: step-by-step net scripts, check-ins, the comments queue, and PDF/Excel exports that match the paper net log.
 

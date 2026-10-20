@@ -3,12 +3,12 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
-<title>Net Control Log</title>
+<title>NetLog</title>
 <link rel="icon" href="icon.svg" type="image/svg+xml">
 <link rel="icon" href="favicon-32.png" sizes="32x32" type="image/png">
 <link rel="apple-touch-icon" href="apple-touch-icon.png">
 <link rel="manifest" href="manifest.webmanifest">
-<meta name="apple-mobile-web-app-title" content="Net Control">
+<meta name="apple-mobile-web-app-title" content="NetLog">
 <meta name="apple-mobile-web-app-capable" content="yes">
 <meta name="theme-color" content="#15233F">
 <link rel="preconnect" href="https://fonts.googleapis.com">
@@ -559,7 +559,7 @@ function viewHome() {
   const logs = Object.values(S.logs).filter(l => l.status !== "live").sort((a, b) => b.startedAt.localeCompare(a.startedAt));
   const live = liveLog();
   const me = S.me.call ? `${esc(S.me.call)}${S.me.name ? ", " + esc(S.me.name) : ""}` : "Set your call sign";
-  let h = topBar(`<img class="applogo" src="icon.svg" alt="">Net Control`, me, "", `<div class="homeclock" aria-live="off"><div class="hc-local" id="hc-local"></div><div class="hc-utc" id="hc-utc"></div></div><button class="icon-btn" data-act="settings" aria-label="Operator settings">${ICON.gear}</button>`);
+  let h = topBar(`<img class="applogo" src="icon.svg" alt="">NetLog`, me, "", `<div class="homeclock" aria-live="off"><div class="hc-local" id="hc-local"></div><div class="hc-utc" id="hc-utc"></div></div><button class="icon-btn" data-act="settings" aria-label="Operator settings">${ICON.gear}</button>`);
   h += `<main class="wrap">`;
   Object.values(S.logs).filter(l => l.status === "live" && onAir(l)).forEach(live => { const sd = new Date(live.startedAt); h += `<div class="banner ${onAir(live) ? "" : "ready"}"><div class="grow">${onAir(live) ? `<div class="onair">On the air</div>` : `<div class="standby">Standing by, not started</div>`}<div><b>${esc(live.net.name)}</b>, ${live.checkins.length} check-ins${onAir(live) ? `, began ${etHM(sd)} (${utcHM(sd)} UTC) ${dateStr(sd)}` : ""}</div></div><div class="row"><button class="btn" data-act="stop-net" data-id="${live.id}">${onAir(live) ? "End net" : "Cancel"}</button><button class="btn ${onAir(live) ? "live" : "primary"}" data-act="resume" data-id="${live.id}">${onAir(live) ? "Resume net" : "Open net"}</button></div></div>`; });
   h += `<h2>Your nets</h2>`;
