@@ -654,7 +654,7 @@ function queue(L, list, emptyMsg) {
     h += `<section class="now" aria-label="Current station"><div class="row" style="justify-content:space-between"><span class="small muted">Station ${n}, ${doneN} of ${list.length} done</span></div>
       <div class="row" style="justify-content:space-between"><div class="call">${esc(cur.call)}</div>${qrzLink(cur.call)}</div><div class="nm">${esc([cur.name, cur.qth].filter(Boolean).join(", "))}</div>${cur.first ? `<div class="welcome">First check-in. Welcome them to the net!</div>` : ""}
       <label class="f"><span>Traffic and comments</span><textarea data-bind="ck:${cur.id}:traffic" placeholder="Jot notes as they talk. Tidy turns rough notes into a clean log line.">${esc(cur.traffic)}</textarea></label>
-      <div class="row">${SR ? `<button class="btn ${listening ? "listening" : ""}" data-act="listen" data-id="${cur.id}">${ICON.mic}${listening ? "Stop listening" : "Listen"}</button>` : ""}
+      <div class="row"><button class="btn ${listening ? "listening" : ""}" data-act="listen" data-id="${cur.id}">${ICON.mic}${listening ? "Stop listening" : "Listen"}</button>
       ${UI.sample ? `<button class="btn" data-act="tidy" data-id="${cur.id}" ${UI.busy[cur.id] ? "disabled" : ""}>${ICON.spark}${UI.busy[cur.id] ? "Tidying…" : "Tidy notes"}</button>` : ""}
       ${cur.prev != null ? `<button class="btn ghost" data-act="undo-tidy" data-id="${cur.id}">Undo tidy</button>` : ""}</div>
       ${L.net.stationComments ? `<div class="ask">Ask: “Any comments for ${esc(cur.call)}?”</div>` : ""}
@@ -812,23 +812,55 @@ function onCallInput(el) {
   sugg.innerHTML = matches.map(c => `<button data-act="pick-sugg" data-c="${esc(c)}">${esc(c)} <span class="muted">${esc(S.dir[c].name || "")}</span></button>`).join("");
 }
 
-let rec = null;
+let rec = null, LISTEN = null;
+const IOS = /iP(hone|ad|od)/.test(navigator.userAgent) || (navigator.platform === "MacIntel" && navigator.maxTouchPoints > 1);
+const STANDALONE = navigator.standalone === true || (window.matchMedia && matchMedia("(display-mode: standalone)").matches);
+function stopListen() { if (LISTEN) LISTEN.want = false; if (rec) { try { rec.stop(); } catch (e) {} } }
+function dictateHint(id, why) {
+  const ta = document.querySelector(`[data-bind="ck:${id}:traffic"]`);
+  if (ta) { ta.focus(); try { ta.setSelectionRange(ta.value.length, ta.value.length); } catch (e) {} }
+  const blocked = why === "not-allowed" || why === "service-not-allowed";
+  toast(blocked && STANDALONE && IOS ? "iPhone and iPad block Listen in Home Screen apps. Tap the mic on the keyboard to dictate, or open NetLog in Safari."
+    : blocked ? "Speech recognition is blocked here. Tap the mic on the keyboard to dictate instead."
+    : "Listen isn’t available in this browser. Tap the mic on the keyboard to dictate.");
+}
 function toggleListen(id) {
-  const L = curLog(); const c = L.checkins.find(x => x.id === id); if (!c || !SR) return;
-  if (rec) { rec.stop(); return; }
-  try { rec = new SR(); } catch (e) { toast("Listening isn’t available here. Use the keyboard’s mic to dictate."); return; }
-  rec.continuous = true; rec.interimResults = true; rec.lang = "en-US";
-  const base = c.traffic ? c.traffic.trim() + " " : "";
-  rec.onresult = ev => {
-    let fin = "", interim = "";
-    for (let i = 0; i < ev.results.length; i++) { const r = ev.results[i]; if (r.isFinal) fin += r[0].transcript + " "; else interim += r[0].transcript; }
-    c.traffic = (base + fin).trim();
-    const ta = document.querySelector(`[data-bind="ck:${c.id}:traffic"]`); if (ta) ta.value = (base + fin + interim).trim();
-    Store.save("log", L.id);
+  const L = curLog(); const c = L && L.checkins.find(x => x.id === id); if (!c) return;
+  if (LISTEN) { stopListen(); return; }
+  if (!SR) { dictateHint(id); return; }
+  const ses = LISTEN = { id, want: true, base: (c.traffic || "").trim(), quick: 0, err: "" };
+  const ta = () => document.querySelector(`[data-bind="ck:${id}:traffic"]`);
+  const finish = () => {
+    rec = null; LISTEN = null; UI.recFor = null; render();
+    if (ses.err === "not-allowed" || ses.err === "service-not-allowed" || ses.err === "unavailable") dictateHint(id, ses.err);
+    else if (ses.err === "quiet") toast("Didn’t hear anything, so Listen stopped.");
+    else if (ses.err) toast(`Listening stopped (${ses.err}).`);
   };
-  rec.onerror = e => { toast(e.error === "not-allowed" || e.error === "service-not-allowed" ? "Microphone is blocked here. Use the keyboard’s mic to dictate instead." : "Listening stopped."); };
-  rec.onend = () => { rec = null; UI.recFor = null; render(); };
-  try { rec.start(); UI.recFor = id; render(); } catch (e) { rec = null; toast("Couldn’t start listening."); }
+  const startOne = () => {
+    let r; try { r = new SR(); } catch (e) { ses.err = "unavailable"; finish(); return; }
+    // iOS Safari repeats or drops text in continuous mode, so it listens in short sessions and restarts until you tap Stop.
+    r.continuous = !IOS; r.interimResults = true; r.lang = "en-US";
+    let said = "", done = false; const t0 = Date.now();
+    r.onresult = ev => {
+      if (done) return;
+      let fin = "", mid = "";
+      for (let i = 0; i < ev.results.length; i++) { const x = ev.results[i]; if (x.isFinal) fin += x[0].transcript + " "; else mid += x[0].transcript + " "; }
+      said = (fin + mid).replace(/\s+/g, " ").trim();
+      const v = (ses.base + " " + said).trim(); c.traffic = v; const el = ta(); if (el) el.value = v; Store.save("log", L.id);
+    };
+    r.onerror = e => { if (e.error === "no-speech" || e.error === "aborted") return; ses.want = false; ses.err = e.error || "error"; };
+    r.onend = () => {
+      if (done) return; done = true;
+      if (said) { ses.base = (ses.base + " " + said).trim(); ses.quick = 0; }
+      else if (Date.now() - t0 < 1500 && ++ses.quick >= 3 && !ses.err) { ses.want = false; ses.err = "quiet"; }
+      c.traffic = ses.base; Store.save("log", L.id);
+      if (ses.want) { try { startOne(); return; } catch (e) {} }
+      finish();
+    };
+    rec = r;
+    try { r.start(); } catch (e) { ses.err = ses.err || "unavailable"; ses.want = false; finish(); }
+  };
+  UI.recFor = id; render(); startOne();
 }
 
 const TIDY_RULES = `You tidy a ham radio net control operator's rough notes into the TRAFFIC column of a net log.
@@ -1221,7 +1253,7 @@ async function importDocx(file) {
 
 /* ---------- events ---------- */
 const ACT = {
-  home() { if (UI.view === "live") { const L = curLog(); if (L && L.status === "live" && !onAir(L)) { if (rec) rec.stop(); delete S.logs[L.id]; Store.remove("log", L.id); UI.logId = null; } } UI.view = "home"; UI.draft = null; render(); window.scrollTo(0, 0); },
+  home() { if (UI.view === "live") { const L = curLog(); if (L && L.status === "live" && !onAir(L)) { stopListen(); delete S.logs[L.id]; Store.remove("log", L.id); UI.logId = null; } } UI.view = "home"; UI.draft = null; render(); window.scrollTo(0, 0); },
   settings() { settingsSheet(); },
   "save-me"() {
     S.me = { call: $("#me-call").value.trim().toUpperCase(), name: $("#me-name").value.trim(), fullName: $("#me-full").value.trim(), qth: $("#me-qth").value.trim(), stepsPos: UI.posDraft || stepsPos(), clubCode: $("#me-code") ? $("#me-code").value.trim() : (S.me.clubCode || "") };
@@ -1266,17 +1298,17 @@ const ACT = {
   pick(b) { UI.cur = b.dataset.id; render(); },
   "tog-stay"(b) { const L = curLog(); const c = L && L.checkins.find(x => x.id === b.dataset.id); if (!c || c.nco) return; c.stay = c.stay === "in" ? "out" : "in"; c.ack = c.stay === "out" ? true : !!c.done; Store.save("log", L.id); render(); },
   "tog-ack"(b) { const L = curLog(); const c = L && L.checkins.find(x => x.id === b.dataset.id); if (!c) return; c.ack = !c.ack; Store.save("log", L.id); render(); },
-  "ci-done"(b) { const L = curLog(); const c = L.checkins.find(x => x.id === b.dataset.id); if (c) { c.done = true; c.ack = true; delete c.prev; } if (rec) rec.stop(); UI.cur = null; Store.save("log", L.id); render(); },
+  "ci-done"(b) { const L = curLog(); const c = L.checkins.find(x => x.id === b.dataset.id); if (c) { c.done = true; c.ack = true; delete c.prev; } stopListen(); UI.cur = null; Store.save("log", L.id); render(); },
   listen(b) { toggleListen(b.dataset.id); },
   tidy(b) { tidyOne(b.dataset.id); },
   "undo-tidy"(b) { const L = curLog(); const c = L.checkins.find(x => x.id === b.dataset.id); if (c && c.prev != null) { c.traffic = c.prev; delete c.prev; Store.save("log", L.id); render(); } },
-  "close-net"() { closeSheet(); const L = curLog(); if (!L) { toast("Couldn’t find the net to end."); return; } if (rec) rec.stop(); L.status = "closed"; L.endedAt = new Date().toISOString(); L.checkins.forEach(c => delete c.prev); Store.flush("log", L.id); UI.view = "review"; render(); window.scrollTo(0, 0); toast("Net ended"); },
+  "close-net"() { closeSheet(); const L = curLog(); if (!L) { toast("Couldn’t find the net to end."); return; } stopListen(); L.status = "closed"; L.endedAt = new Date().toISOString(); L.checkins.forEach(c => delete c.prev); Store.flush("log", L.id); UI.view = "review"; render(); window.scrollTo(0, 0); toast("Net ended"); },
   "begin-net"(b) { const L = S.logs[b.dataset.id]; if (!L) return; const now = new Date().toISOString(); L.onAir = true; L.startedAt = now; L.checkins.forEach(c => { if (c.nco) c.at = now; }); Store.flush("log", L.id); render(); toast("On the air"); },
   "stop-net"(b) { const L = S.logs[b.dataset.id]; if (!L) return; UI.logId = L.id; ACT["close-net"](); },
   "old-stop-net"(b) { const L = S.logs[b.dataset.id]; if (!L) return; UI.logId = L.id;
     if (!onAir(L)) { openSheet(`<h3>Cancel ${esc(L.net.name)}?</h3><p class="muted">This net hasn’t begun yet. Canceling deletes it${L.checkins.length > 1 ? `, along with ${L.checkins.length - 1} check-ins` : ""}.</p><div class="row"><button class="btn danger" data-act="discard-net">Cancel net</button><button class="btn" data-act="close-sheet">Keep it</button></div>`); return; }
     openSheet(`<h3>End ${esc(L.net.name)}?</h3><p class="muted">${L.checkins.length} check-ins logged so far.</p><div class="list"><button class="li" data-act="close-net"><div class="grow"><b>Close and save the log</b><div class="small muted">Ends the net now and opens the review screen for export</div></div></button><button class="li" data-act="discard-net"><div class="grow"><b style="color:var(--signal)">Discard this net</b><div class="small muted">Deletes the log. Use this for a test run or a false start</div></div></button></div><div class="row" style="margin-top:12px"><button class="btn block" data-act="close-sheet">Keep it running</button></div>`); },
-  "discard-net"() { const id = UI.logId; if (rec) rec.stop(); delete S.logs[id]; Store.remove("log", id); closeSheet(); UI.view = "home"; UI.logId = null; render(); toast("Net discarded"); },
+  "discard-net"() { const id = UI.logId; stopListen(); delete S.logs[id]; Store.remove("log", id); closeSheet(); UI.view = "home"; UI.logId = null; render(); toast("Net discarded"); },
   reopen() { const L = curLog(); if (liveLog() && liveLog().id !== L.id) { toast("Another net is on the air. Close it first."); return; } L.status = "live"; L.endedAt = null; Store.save("log", L.id); UI.view = "live"; UI.tab = "log"; render(); },
   "del-log"() { openSheet(`<h3>Delete this log?</h3><p class="muted">This can’t be undone. Export it first if you need a copy.</p><div class="row"><button class="btn danger" data-act="del-log-yes">Delete log</button><button class="btn" data-act="close-sheet">Keep it</button></div>`); },
   "del-log-yes"() { const id = UI.logId; delete S.logs[id]; Store.remove("log", id); closeSheet(); UI.view = "home"; render(); },
