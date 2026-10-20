@@ -824,37 +824,51 @@ function dictateHint(id, why) {
     : blocked ? "Speech recognition is blocked here. Tap the mic on the keyboard to dictate instead."
     : "Listen isn’t available in this browser. Tap the mic on the keyboard to dictate.");
 }
+function listenHelp(id, ses) {
+  openSheet(`<h3>Listen couldn’t hear the microphone</h3>
+    <p>The browser started listening but never got any sound. On iPad this is usually a setting:</p>
+    <ul class="small"><li>Open NetLog in Safari itself, not from the Home Screen icon, and try again.</li>
+    <li>Tap <b>aA</b> in Safari’s address bar, then Website Settings, and set Microphone to Allow.</li>
+    <li>Make sure Dictation is on under Settings, General, Keyboard.</li>
+    <li>Close anything else using the mic, like a call or a radio app, and check that a Bluetooth headset isn’t holding the mic.</li></ul>
+    <p>The keyboard mic always works, so that’s the quick fix during a net.</p>
+    <details class="small" style="margin-top:8px"><summary>Details for troubleshooting</summary><pre style="white-space:pre-wrap;font-size:12px">${esc([IOS ? "iOS" : "not iOS", STANDALONE ? "Home Screen app" : "browser tab", navigator.userAgent, ...ses.trace].join("\n"))}</pre></details>
+    <div class="row" style="margin-top:12px"><button class="btn primary grow" data-act="dictate-kb" data-id="${id}">Use the keyboard mic</button><button class="btn" data-act="close-sheet">Close</button></div>`);
+}
 function toggleListen(id) {
   const L = curLog(); const c = L && L.checkins.find(x => x.id === id); if (!c) return;
   if (LISTEN) { stopListen(); return; }
   if (!SR) { dictateHint(id); return; }
-  const ses = LISTEN = { id, want: true, base: (c.traffic || "").trim(), quick: 0, err: "" };
+  const ses = LISTEN = { id, want: true, base: (c.traffic || "").trim(), quick: 0, err: "", trace: [], t0: Date.now(), heard: false };
+  const log = ev => { if (ses.trace.length < 60) ses.trace.push(`${((Date.now() - ses.t0) / 1000).toFixed(1)}s ${ev}`); };
   const ta = () => document.querySelector(`[data-bind="ck:${id}:traffic"]`);
   const finish = () => {
     rec = null; LISTEN = null; UI.recFor = null; render();
     if (ses.err === "not-allowed" || ses.err === "service-not-allowed" || ses.err === "unavailable") dictateHint(id, ses.err);
-    else if (ses.err === "quiet") toast("Didn’t hear anything, so Listen stopped.");
+    else if (ses.err === "quiet") listenHelp(id, ses);
     else if (ses.err) toast(`Listening stopped (${ses.err}).`);
   };
   const startOne = () => {
     let r; try { r = new SR(); } catch (e) { ses.err = "unavailable"; finish(); return; }
     // iOS Safari repeats or drops text in continuous mode, so it listens in short sessions and restarts until you tap Stop.
     r.continuous = !IOS; r.interimResults = true; r.lang = "en-US";
+    ["audiostart", "soundstart", "speechstart", "speechend", "soundend", "audioend"].forEach(n => { r["on" + n] = () => { log(n); if (n === "soundstart" || n === "speechstart") ses.heard = true; }; });
+    log("start");
     let said = "", done = false; const t0 = Date.now();
     r.onresult = ev => {
-      if (done) return;
+      if (done) return; log("result"); ses.heard = true;
       let fin = "", mid = "";
       for (let i = 0; i < ev.results.length; i++) { const x = ev.results[i]; if (x.isFinal) fin += x[0].transcript + " "; else mid += x[0].transcript + " "; }
       said = (fin + mid).replace(/\s+/g, " ").trim();
       const v = (ses.base + " " + said).trim(); c.traffic = v; const el = ta(); if (el) el.value = v; Store.save("log", L.id);
     };
-    r.onerror = e => { if (e.error === "no-speech" || e.error === "aborted") return; ses.want = false; ses.err = e.error || "error"; };
+    r.onerror = e => { log("error " + (e.error || "")); if (e.error === "no-speech" || e.error === "aborted") return; ses.want = false; ses.err = e.error || "error"; };
     r.onend = () => {
-      if (done) return; done = true;
+      if (done) return; done = true; log("end");
       if (said) { ses.base = (ses.base + " " + said).trim(); ses.quick = 0; }
-      else if (Date.now() - t0 < 1500 && ++ses.quick >= 3 && !ses.err) { ses.want = false; ses.err = "quiet"; }
+      else if (!ses.heard && ++ses.quick >= (Date.now() - t0 < 2500 ? 3 : 4) && !ses.err) { ses.want = false; ses.err = "quiet"; }
       c.traffic = ses.base; Store.save("log", L.id);
-      if (ses.want) { try { startOne(); return; } catch (e) {} }
+      if (ses.want) { setTimeout(() => { if (ses.want) startOne(); else finish(); }, IOS ? 350 : 50); return; }
       finish();
     };
     rec = r;
@@ -1338,6 +1352,7 @@ Object.assign(ACT, {
 });
 ACT["dir-export"] = () => saveFile(`NetLog-directory-${fileDate(new Date())}.csv`, new Blob([dirCsv()], { type: "text/csv" }));
 ACT["dir-template"] = () => saveFile("NetLog-directory-template.csv", new Blob(["Call,Name,QTH,Count,CARES,LARC,Last\nW1AW,Hiram,Newington,,,,\n"], { type: "text/csv" }));
+ACT["dictate-kb"] = b => { closeSheet(); setTimeout(() => { const ta = document.querySelector(`[data-bind="ck:${b.dataset.id}:traffic"]`); if (ta) { ta.focus(); try { ta.setSelectionRange(ta.value.length, ta.value.length); } catch (e) {} } toast("Tap the mic on the keyboard and talk."); }, 50); };
 ACT.pos = b => { UI.posDraft = b.dataset.v; document.querySelectorAll('[data-act="pos"]').forEach(x => x.classList.toggle("on", x.dataset.v === UI.posDraft)); };
 function pendingExtra(L) {
   const st = L.net.steps[L.step], nx = L.net.steps[L.step + 1];
