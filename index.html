@@ -722,7 +722,9 @@ function viewDir() {
   const q = UI.dirQ.toUpperCase();
   const rows = Object.entries(S.dir).filter(([c, v]) => !q || c.includes(q) || (v.name || "").toUpperCase().includes(q)).sort((a, b) => (b[1].count || 0) - (a[1].count || 0) || a[0].localeCompare(b[0]));
   let h = topBar("Station directory", `${Object.keys(S.dir).length} stations`, `<button class="icon-btn" data-act="home" aria-label="Back">${ICON.back}</button>`, "");
-  h += `<main class="wrap"><label class="f"><span>Search</span><input type="text" id="dirq" data-bind="dirq" value="${esc(UI.dirQ)}" autocapitalize="characters"></label>
+  h += `<main class="wrap"><div class="row" style="margin:6px 0 12px"><label class="btn primary" for="dir-in">Import from file</label><input type="file" id="dir-in" accept=".csv,.txt,.xlsx,.xls,text/csv" class="sr"><button class="btn" data-act="dir-export" ${Object.keys(S.dir).length ? "" : "disabled"}>Export directory</button><button class="btn ghost" data-act="dir-template">Get a blank template</button></div>
+    <p class="small muted" style="margin-top:0">Import a CSV or Excel file with columns for Call, Name and QTH. Count, CARES, LARC and Last are optional. Stations already here are updated, not duplicated.</p>
+    <label class="f"><span>Search</span><input type="text" id="dirq" data-bind="dirq" value="${esc(UI.dirQ)}" autocapitalize="characters"></label>
     <div class="list">${rows.length ? rows.map(([c, v]) => `<button class="li" data-act="edit-dir" data-c="${esc(c)}"><div class="grow"><span class="call" style="font-size:20px;font-weight:700">${esc(c)}</span> <span class="muted">${esc([v.name, v.qth].filter(Boolean).join(", "))}</span></div><span class="small muted" style="text-align:right">${v.count || 0} nets${v.cares || v.larc ? `<br>${[v.cares ? "CARES " + v.cares : "", v.larc ? "LARC " + v.larc : ""].filter(Boolean).join(", ")}` : ""}</span></button>`).join("") : `<div class="empty">Stations are added as you log check-ins.</div>`}</div></main>`;
   return h;
 }
@@ -1141,6 +1143,65 @@ function buildPdf(L) {
   return { name: h.file + ".pdf", blob: doc.output("blob") };
 }
 
+/* ---------- station directory import / export ---------- */
+function parseCsv(text) {
+  const rows = []; let row = [], f = "", q = false;
+  for (let i = 0; i < text.length; i++) {
+    const ch = text[i];
+    if (q) { if (ch === '"') { if (text[i + 1] === '"') { f += '"'; i++; } else q = false; } else f += ch; }
+    else if (ch === '"') q = true;
+    else if (ch === "," || ch === "\t" || ch === ";") { row.push(f); f = ""; }
+    else if (ch === "\n" || ch === "\r") { if (ch === "\r" && text[i + 1] === "\n") i++; row.push(f); rows.push(row); row = []; f = ""; }
+    else f += ch;
+  }
+  if (f || row.length) { row.push(f); rows.push(row); }
+  return rows.filter(r => r.some(c => String(c).trim()));
+}
+async function readRows(file) {
+  const isSheet = /\.(xlsx|xls|ods|numbers)$/i.test(file.name);
+  if (isSheet) {
+    if (!window.XLSX) throw new Error("Excel import is still loading. Try again in a second.");
+    const wb = XLSX.read(await file.arrayBuffer(), { type: "array" });
+    return XLSX.utils.sheet_to_json(wb.Sheets[wb.SheetNames[0]], { header: 1, defval: "", raw: false });
+  }
+  return parseCsv(await file.text());
+}
+async function importDir(file) {
+  let rows;
+  try { rows = await readRows(file); } catch (e) { toast(e.message || "Couldn’t read that file."); return; }
+  if (!rows.length) { toast("That file looks empty."); return; }
+  const norm = s => String(s || "").toLowerCase().replace(/[^a-z]/g, "");
+  const head = rows[0].map(norm);
+  const find = (...names) => head.findIndex(h => names.includes(h));
+  let col = { call: find("call", "callsign", "calls", "station"), name: find("name", "firstname", "operator", "op"), qth: find("qth", "location", "city", "town", "loc"),
+    count: find("count", "nets", "checkins", "total"), cares: find("cares", "caresnets"), larc: find("larc", "larcnets"), last: find("last", "lastseen", "lastcheckin") };
+  let body = rows;
+  if (col.call >= 0) body = rows.slice(1); else col = { call: 0, name: 1, qth: 2, count: -1, cares: -1, larc: -1, last: -1 };
+  const cell = (r, i) => i >= 0 ? String(r[i] ?? "").trim() : "";
+  const num = (r, i) => { const n = parseInt(cell(r, i), 10); return isNaN(n) ? 0 : n; };
+  let added = 0, updated = 0, skipped = 0;
+  body.forEach(r => {
+    const call = cell(r, col.call).toUpperCase().replace(/\s+/g, "");
+    if (!/^[A-Z0-9]{1,3}[0-9][A-Z0-9]{0,4}[A-Z](\/[A-Z0-9]+)?$/.test(call)) { skipped++; return; }
+    const prev = S.dir[call]; const v = Object.assign({}, prev || {});
+    const nm = cell(r, col.name), qth = cell(r, col.qth), last = cell(r, col.last);
+    if (nm) v.name = nm; if (qth) v.qth = qth; if (last) v.last = last;
+    v.name = v.name || ""; v.qth = v.qth || "";
+    if (col.count >= 0) v.count = Math.max(v.count || 0, num(r, col.count));
+    if (col.cares >= 0) v.cares = Math.max(v.cares || 0, num(r, col.cares));
+    if (col.larc >= 0) v.larc = Math.max(v.larc || 0, num(r, col.larc));
+    if (!v.count) v.count = Math.max((v.cares || 0) + (v.larc || 0), prev ? prev.count || 0 : 0);
+    S.dir[call] = v; prev ? updated++ : added++;
+  });
+  Store.save("dir"); render();
+  openSheet(`<h3>Directory imported</h3><p>${added} station${added === 1 ? "" : "s"} added, ${updated} updated${skipped ? `, ${skipped} row${skipped === 1 ? "" : "s"} skipped (no valid call sign)` : ""}.</p><p class="small muted">Typing any of these call signs during a net now fills in the name and location.</p><div class="row" style="margin-top:12px"><button class="btn primary grow" data-act="close-sheet">Done</button></div>`);
+}
+function dirCsv() {
+  const q = v => /[",\n]/.test(v) ? `"${String(v).replace(/"/g, '""')}"` : String(v ?? "");
+  const rows = Object.entries(S.dir).sort((a, b) => (b[1].count || 0) - (a[1].count || 0) || a[0].localeCompare(b[0]));
+  return ["Call,Name,QTH,Count,CARES,LARC,Last", ...rows.map(([c, v]) => [c, v.name || "", v.qth || "", v.count || 0, v.cares || 0, v.larc || 0, v.last || ""].map(q).join(","))].join("\n") + "\n";
+}
+
 /* ---------- docx import ---------- */
 async function importDocx(file) {
   if (!window.mammoth) { toast("Word import is still loading. Try again in a second."); return; }
@@ -1243,6 +1304,8 @@ Object.assign(ACT, {
   async "club-save"() { UI.busy.club = true; render(); try { await api("/config", { method: "PUT", body: JSON.stringify({ config: UI.club }) }); toast("Roster and schedule saved"); loadSched(); } catch (e) { toast(e.code === "auth" ? "Check the club passcode in Settings." : "Couldn’t save: " + e.message); } UI.busy.club = false; render(); },
   async "club-test"(b) { try { await api("/config", { method: "PUT", body: JSON.stringify({ config: UI.club }) }); const j = await api("/test-reminder", { method: "POST", body: JSON.stringify({ key: b.dataset.k }) }); toast(`Test sent to ${j.sent} ${j.sent === 1 ? "person" : "people"}`); } catch (e) { toast("Couldn’t send: " + e.message); } }
 });
+ACT["dir-export"] = () => saveFile(`NetLog-directory-${fileDate(new Date())}.csv`, new Blob([dirCsv()], { type: "text/csv" }));
+ACT["dir-template"] = () => saveFile("NetLog-directory-template.csv", new Blob(["Call,Name,QTH,Count,CARES,LARC,Last\nW1AW,Hiram,Newington,,,,\n"], { type: "text/csv" }));
 ACT.pos = b => { UI.posDraft = b.dataset.v; document.querySelectorAll('[data-act="pos"]').forEach(x => x.classList.toggle("on", x.dataset.v === UI.posDraft)); };
 function pendingExtra(L) {
   const st = L.net.steps[L.step], nx = L.net.steps[L.step + 1];
@@ -1280,6 +1343,7 @@ document.addEventListener("input", e => {
 document.addEventListener("change", e => {
   const el = e.target;
   if (el.id === "docx-in" && el.files && el.files[0]) importDocx(el.files[0]);
+  if (el.id === "dir-in" && el.files && el.files[0]) { importDir(el.files[0]); el.value = ""; }
   if (el.dataset && el.dataset.bind && el.tagName === "SELECT" && el.dataset.bind.startsWith("step:")) render();
   if (el.dataset && el.dataset.bind && el.type === "checkbox" && el.dataset.bind.startsWith("step:")) { const [, i, k] = el.dataset.bind.split(":"); UI.draft.steps[+i][k] = el.checked; }
 });
